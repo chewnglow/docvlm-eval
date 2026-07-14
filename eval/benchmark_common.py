@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import hashlib
 import json
 import math
 import mimetypes
@@ -353,14 +354,20 @@ def parquet_rows(paths: Iterable[Path]) -> Iterable[dict[str, Any]]:
 
 def load_mmlongbench(dataset_root: Path, split: str = "train") -> Iterable[dict[str, Any]]:
     data_dir = dataset_root / "mmlongbench-doc" / "data"
-    for row in parquet_rows(data_dir.glob(f"{split}-*.parquet")):
+    for row_index, row in enumerate(parquet_rows(data_dir.glob(f"{split}-*.parquet"))):
         doc_id = str(row["doc_id"])
+        question = str(row["question"])
+        row_id = row.get("question_id") or row.get("qa_id") or row.get("id")
+        if row_id is None:
+            digest = hashlib.sha1(f"{doc_id}\0{question}".encode("utf-8")).hexdigest()[:16]
+            row_id = f"{Path(doc_id).stem}:{row_index:06d}:{digest}"
         stem = Path(doc_id).stem
         image_dir = dataset_root / "mmlongbench-doc" / "document_images" / stem
         yield {
             "dataset": "mmlongbench-doc",
-            "id": doc_id,
-            "question": row["question"],
+            "id": str(row_id),
+            "doc_id": doc_id,
+            "question": question,
             "answer": row["answer"],
             "answer_format": normalize_answer_format(row.get("answer_format")),
             "image_paths": [str(p) for p in list_image_files(image_dir)],
@@ -428,11 +435,13 @@ def load_slidevqa(dataset_root: Path, split: str, image_cache: Path) -> Iterable
     data_dir = dataset_root / "slidevqa" / "data"
     for row in parquet_rows(data_dir.glob(f"{split}-*.parquet")):
         qa_id = str(row["qa_id"])
+        deck_identity = str(row.get("deck_url") or row.get("deck_name") or qa_id)
+        deck_cache_key = hashlib.sha1(deck_identity.encode("utf-8")).hexdigest()[:20]
         image_paths: list[str] = []
         for idx, col in enumerate(PAGE_COLUMNS, start=1):
             saved = _save_slide_image(
                 row.get(col),
-                image_cache / split / qa_id / f"page_{idx:02d}.png",
+                image_cache / split / "decks" / deck_cache_key / f"page_{idx:02d}.png",
             )
             if saved is not None:
                 image_paths.append(str(saved))

@@ -64,8 +64,15 @@ OPENAI_API_KEY=... OPENAI_BASE_URL=http://localhost:8000/v1 \
   --dataset mmlongbench-doc \
   --dataset-root dataset \
   --model Step3VL10B \
+  --request-concurrency 4 \
   --output outputs/benchmarks/mmlongbench-doc.pred.jsonl
 ```
+
+`run_benchmarks.py` uses concurrent OpenAI-compatible requests rather than
+direct `vllm.LLM.generate(prompts, ...)`. With vLLM serving, those concurrent
+requests are batched by the vLLM server when its `--max-num-seqs` is greater
+than 1. The distributed launcher defaults to `MAX_NUM_SEQS=4` and
+`REQUEST_CONCURRENCY=4`.
 
 For SlideVQA, choose `--split val` or `--split test`:
 
@@ -75,6 +82,7 @@ For SlideVQA, choose `--split val` or `--split test`:
   --split val \
   --dataset-root dataset \
   --model Step3VL10B \
+  --request-concurrency 4 \
   --output outputs/benchmarks/slidevqa-val.pred.jsonl
 ```
 
