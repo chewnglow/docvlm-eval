@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+PYTHON="${PYTHON:-${ROOT_DIR}/.venv/bin/python}"
 
 DATASET="${DATASET:-${1:-}}"
 RUN_DIR="${RUN_DIR:-${2:-}}"
@@ -17,11 +18,11 @@ PRED="${RUN_DIR}/predictions.jsonl"
 SCORED="${RUN_DIR}/scored.jsonl"
 SUMMARY="${RUN_DIR}/metrics.json"
 
-"${ROOT_DIR}/.venv/bin/python" "${SCRIPT_DIR}/merge_predictions.py" \
+"${PYTHON}" "${SCRIPT_DIR}/merge_predictions.py" \
   --shard-dir "${RUN_DIR}/shards" \
   --output "${PRED}"
 
-"${ROOT_DIR}/.venv/bin/python" "${ROOT_DIR}/eval/score_benchmarks.py" \
+"${PYTHON}" "${ROOT_DIR}/eval/score_benchmarks.py" \
   --dataset "${DATASET}" \
   --predictions "${PRED}" \
   --output "${SCORED}" \
@@ -32,4 +33,3 @@ echo "Wrote:"
 echo "  ${PRED}"
 echo "  ${SCORED}"
 echo "  ${SUMMARY}"
-

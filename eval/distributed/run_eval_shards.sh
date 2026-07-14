@@ -24,9 +24,11 @@ DATASET_ROOT="${DATASET_ROOT:-${ROOT_DIR}/dataset}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${ROOT_DIR}/outputs/distributed}"
 MAX_IMAGES="${MAX_IMAGES:-8}"
 MAX_TOKENS="${MAX_TOKENS:-256}"
+REQUEST_CONCURRENCY="${REQUEST_CONCURRENCY:-4}"
 LIMIT_PER_SHARD="${LIMIT_PER_SHARD:-}"
 IMAGE_CACHE="${IMAGE_CACHE:-${OUTPUT_ROOT}/image_cache}"
 API_KEY="${OPENAI_API_KEY:-dummy}"
+PYTHON="${PYTHON:-${ROOT_DIR}/.venv/bin/python}"
 
 resolve_model_preset "${MODEL_KEY}"
 RUN_NAME="${RUN_NAME:-${SERVED_MODEL_NAME}-${DATASET}-${SPLIT}-img${MAX_IMAGES}-tok${MAX_TOKENS}}"
@@ -35,7 +37,7 @@ SHARD_DIR="${RUN_DIR}/shards"
 LOG_DIR="${RUN_DIR}/logs/node-${NODE_RANK}"
 mkdir -p "${SHARD_DIR}" "${LOG_DIR}"
 
-TOTAL_COUNT="$("${ROOT_DIR}/.venv/bin/python" "${SCRIPT_DIR}/count_records.py" \
+TOTAL_COUNT="$("${PYTHON}" "${SCRIPT_DIR}/count_records.py" \
   --dataset "${DATASET}" \
   --dataset-root "${DATASET_ROOT}" \
   --split "${SPLIT}" \
@@ -43,6 +45,7 @@ TOTAL_COUNT="$("${ROOT_DIR}/.venv/bin/python" "${SCRIPT_DIR}/count_records.py" \
 
 echo "Run: ${RUN_NAME}"
 echo "Dataset records: ${TOTAL_COUNT}; total shards: ${TOTAL_SHARDS}; node rank: ${NODE_RANK}"
+echo "Per-server request concurrency: ${REQUEST_CONCURRENCY}"
 
 PIDS=()
 for LOCAL_RANK in $(seq 0 $((GPUS_PER_NODE - 1))); do
@@ -50,7 +53,7 @@ for LOCAL_RANK in $(seq 0 $((GPUS_PER_NODE - 1))); do
   if [[ "${SHARD_ID}" -ge "${TOTAL_SHARDS}" ]]; then
     continue
   fi
-  read -r OFFSET LIMIT < <("${ROOT_DIR}/.venv/bin/python" "${SCRIPT_DIR}/shard_plan.py" \
+  read -r OFFSET LIMIT < <("${PYTHON}" "${SCRIPT_DIR}/shard_plan.py" \
     --total "${TOTAL_COUNT}" \
     --num-shards "${TOTAL_SHARDS}" \
     --shard-id "${SHARD_ID}")
@@ -64,7 +67,7 @@ for LOCAL_RANK in $(seq 0 $((GPUS_PER_NODE - 1))); do
   (
     cd "${ROOT_DIR}"
     OPENAI_API_KEY="${API_KEY}" OPENAI_BASE_URL="http://127.0.0.1:${PORT}/v1" \
-    "${ROOT_DIR}/.venv/bin/python" eval/run_benchmarks.py \
+    "${PYTHON}" eval/run_benchmarks.py \
       --dataset "${DATASET}" \
       --dataset-root "${DATASET_ROOT}" \
       --split "${SPLIT}" \
@@ -74,6 +77,7 @@ for LOCAL_RANK in $(seq 0 $((GPUS_PER_NODE - 1))); do
       --limit "${LIMIT}" \
       --max-images "${MAX_IMAGES}" \
       --max-tokens "${MAX_TOKENS}" \
+      --request-concurrency "${REQUEST_CONCURRENCY}" \
       --image-cache "${IMAGE_CACHE}" \
       --resume
   ) >"${LOG}" 2>&1 &
@@ -92,4 +96,3 @@ if [[ "${STATUS}" -ne 0 ]]; then
   exit "${STATUS}"
 fi
 echo "All local shards finished for ${RUN_NAME}."
-

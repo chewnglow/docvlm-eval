@@ -30,13 +30,17 @@ def main() -> None:
     total = 0
     kept = 0
     with output.open("w") as out:
-      for shard in sorted(shard_dir.glob("shard-*-of-*.jsonl"), key=shard_key):
+      for shard in sorted(shard_dir.glob("*.jsonl"), key=shard_key):
           with shard.open() as f:
               for line in f:
                   if not line.strip():
                       continue
                   total += 1
-                  row = json.loads(line)
+                  try:
+                      row = json.loads(line)
+                  except json.JSONDecodeError:
+                      print(f"warning: skipped malformed JSONL fragment in {shard}")
+                      continue
                   key = str(row.get("id", f"__missing__{total}"))
                   if key in seen:
                       continue
@@ -48,4 +52,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
