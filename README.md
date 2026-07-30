@@ -16,6 +16,7 @@ before scoring so generation and metric calculation remain separable.
 |---|---|---|
 | Existing model endpoint | `eval/run_benchmarks.py` | Concurrent requests to one endpoint |
 | One small GPU node | `eval/distributed/run_local_8gpu_eval.sh` | Fixed contiguous shards |
+| Ray cluster/web job | `eval/distributed/ray_orchestrator.py` | One submission, automatic node assignment |
 | 16–128 Ascend NPUs | `eval/distributed/run_ascend_suite.sh` | Dynamic shared pull queue |
 
 For the Ascend fleet, each NPU hosts one complete TP=1 model replica. Workers
@@ -115,6 +116,91 @@ export SERVED_MODEL_NAME=CustomModelName
 All nodes in one model group must see the same model path.
 
 ## 4. Run on 16–128 Ascend NPUs
+
+### One-command Ray orchestration
+
+Use Ray when the cluster or rental platform exposes a Ray dashboard/job endpoint.
+The orchestrator is submitted once and performs the per-node launch automatically.
+It discovers live compute nodes, divides them between Qwen and Step, assigns
+node-local ranks, reserves the advertised NPU capacity, and pins one suite
+launcher to every selected node.
+
+Ray must already be running on the allocated nodes. Advertise the Ascend devices
+as a custom `NPU` resource when starting each compute node. A CPU-only head node
+does not need this resource:
+
+```bash
+# Head node
+ray start --head --port=6379 --dashboard-host=0.0.0.0
+
+# Every 8-NPU compute node
+ray start \
+  --address=<head-node-ip>:6379 \
+  --resources='{"NPU": 8}'
+```
+
+If the head node is also an 8-NPU compute node, add
+`--resources='{"NPU": 8}'` to its `ray start` command.
+
+Submit the complete evaluation from a workstation, the Ray dashboard, or the
+rental platform's web-job form:
+
+```bash
+ray job submit \
+  --address=http://<head-node-ip>:8265 \
+  --working-dir . \
+  -- \
+  python eval/distributed/ray_orchestrator.py \
+    --total-devices 128 \
+    --qwen-devices 64 \
+    --step-devices 64 \
+    --node-capacity 8 \
+    --resource-key NPU \
+    --output-root /shared/docvlm_eval \
+    --dataset-root /data/docvlm/dataset \
+    --python /opt/docvlm/bin/python \
+    --qwen-model-path /models/Qwen3.5-9B \
+    --step-model-path /models/Step3VL10B
+```
+
+In a web form that already supplies the Ray cluster and source working
+directory, use only this entrypoint:
+
+```bash
+python eval/distributed/ray_orchestrator.py \
+  --total-devices 128 \
+  --output-root /shared/docvlm_eval \
+  --dataset-root /data/docvlm/dataset \
+  --python /opt/docvlm/bin/python \
+  --qwen-model-path /models/Qwen3.5-9B \
+  --step-model-path /models/Step3VL10B
+```
+
+Use `--dry-run` to verify the discovered nodes and model allocation without
+starting vLLM. Qwen and Step run concurrently on separate node groups; each
+group runs its configured `BENCHMARKS` in sequence while all nodes assigned to
+that group pull evaluation work concurrently.
+
+The source tree is uploaded by Ray Jobs. `.rayignore` excludes `dataset/`,
+`models/`, `outputs/`, and `.venv/` so multi-gigabyte artifacts are not included.
+Those directories must instead be mounted or staged on every compute node. In
+particular:
+
+- `--output-root` must be one shared filesystem path visible to every node;
+- `--dataset-root` and both model paths must exist at the same paths on the
+  nodes that run them;
+- the Python/vLLM-Ascend environment must already exist on every node;
+- every compute node must advertise at least `--node-capacity` units of the
+  selected Ray resource.
+
+The orchestrator stops the vLLM servers when the suite finishes. Pass
+`--keep-servers` to retain them. If a node launcher fails, successful responses
+remain checkpointed in the shared queue; resubmitting the same command resumes
+the run. Per-node server logs and PID files are retained under
+`OUTPUT_ROOT/_ray_nodes/`.
+
+The manual per-node procedure below remains available when the platform does
+not provide Ray.
 
 ### Device allocation
 

@@ -14,6 +14,11 @@ global queue is empty, orders image-heavy work first, bundles questions from the
 same document, retries transient failures, and recovers abandoned tasks by
 lease.
 
+For a single web or CLI submission to an existing Ray cluster, use
+`ray_orchestrator.py`. Ray handles node discovery, resource reservation, and
+remote process launch; the filesystem queue continues to handle fine-grained
+evaluation scheduling.
+
 ## Prerequisites
 
 All nodes should have the same project path, Python dependencies, dataset files,
@@ -44,6 +49,39 @@ must also be identical on every node because the queue manifest stores image
 paths.
 
 ## Flexible 16–128 NPU Ascend Run
+
+### Submit once with Ray
+
+Start every Ascend compute node with a custom resource matching its device
+capacity, for example `--resources='{"NPU": 8}'`. Then submit:
+
+```bash
+ray job submit \
+  --address=http://<head-node-ip>:8265 \
+  --working-dir . \
+  -- \
+  python eval/distributed/ray_orchestrator.py \
+    --total-devices 128 \
+    --qwen-devices 64 \
+    --step-devices 64 \
+    --node-capacity 8 \
+    --output-root /shared/docvlm_eval \
+    --dataset-root /data/docvlm/dataset \
+    --python /opt/docvlm/bin/python \
+    --qwen-model-path /models/Qwen3.5-9B \
+    --step-model-path /models/Step3VL10B
+```
+
+The head node may be CPU-only. Only live nodes advertising the `NPU` resource
+are selected. The orchestrator assigns distinct nodes to each model group,
+launches both groups concurrently, and cleans up their vLLM servers at the end.
+Use `--dry-run` to print the assignment without launching.
+
+The Ray working-directory upload excludes datasets, models, outputs, and virtual
+environments through the repository's `.rayignore`. Data and models must be
+mounted at consistent paths, and `OUTPUT_ROOT` must be shared by all nodes.
+
+The remaining commands in this section are the manual per-node alternative.
 
 Set `TOTAL_DEVICES` to any integer from 16 through 128. By default the planner
 splits the devices evenly between the two models, giving the extra device to
