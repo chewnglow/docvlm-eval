@@ -1,0 +1,9 @@
+.git/
+.venv/
+dataset/
+models/
+outputs/
+__pycache__/
+*.py[cod]
+.DS_Store
+__MACOSX/
