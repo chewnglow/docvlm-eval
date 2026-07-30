@@ -9,13 +9,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
-
-from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
 
 DATASETS = {
@@ -41,6 +40,11 @@ MMLONGBENCH_IMAGE_FALLBACKS = [
 DOCUMENT_SUFFIXES = {".pdf"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar")
+POPPLER_LIGATURE_WARNING = re.compile(
+    r'^(?:Syntax\s+)?Warning:\s+Could not parse ligature component '
+    r'".*" of ".*" in parseCharName\s*$',
+    re.IGNORECASE,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,6 +74,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def download(repo_id: str, target: Path, max_workers: int, ignore_patterns: list[str] | None) -> None:
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "huggingface_hub is required for dataset downloads. "
+            "Install eval/requirements-benchmark.txt first."
+        ) from exc
     target.mkdir(parents=True, exist_ok=True)
     snapshot_download(
         repo_id=repo_id,
@@ -81,6 +92,13 @@ def download(repo_id: str, target: Path, max_workers: int, ignore_patterns: list
 
 
 def download_mmlongbench_fallback_images(dataset_dir: Path) -> None:
+    try:
+        from huggingface_hub import HfApi, hf_hub_download
+    except ImportError as exc:
+        raise RuntimeError(
+            "huggingface_hub is required for MMLongBench fallback images. "
+            "Install eval/requirements-benchmark.txt first."
+        ) from exc
     api = HfApi()
     repo_id = "YeMoKoo/MMLongBench_doc"
     remote_prefix = "MMLongBench_Images_JPG_valid"
@@ -137,6 +155,18 @@ def find_pdftoppm() -> str:
     raise RuntimeError("pdftoppm was not found; install poppler or put pdftoppm on PATH.")
 
 
+def filter_poppler_stderr(stderr: str) -> tuple[list[str], int]:
+    """Return actionable Poppler messages and a count of known glyph warnings."""
+    visible: list[str] = []
+    suppressed = 0
+    for line in stderr.splitlines():
+        if POPPLER_LIGATURE_WARNING.fullmatch(line.strip()):
+            suppressed += 1
+        elif line.strip():
+            visible.append(line)
+    return visible, suppressed
+
+
 def render_pdf(pdftoppm: str, pdf: Path, images_root: Path, dpi: int) -> None:
     out_dir = images_root / pdf.stem
     marker = out_dir / ".render_complete"
@@ -145,10 +175,32 @@ def render_pdf(pdftoppm: str, pdf: Path, images_root: Path, dpi: int) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = out_dir / "page"
     print(f"[render] {pdf} -> {out_dir}", flush=True)
-    subprocess.run(
+    result = subprocess.run(
         [pdftoppm, "-png", "-r", str(dpi), str(pdf), str(prefix)],
-        check=True,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
+    visible, suppressed = filter_poppler_stderr(result.stderr or "")
+    if suppressed:
+        print(
+            f"[render-warning] {pdf.name}: suppressed {suppressed} "
+            "non-fatal malformed ligature-name warning(s)",
+            flush=True,
+        )
+    if visible:
+        print("\n".join(visible), file=sys.stderr, flush=True)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode,
+            result.args,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    pages = sorted(out_dir.glob("page-*.png"))
+    if not pages:
+        raise RuntimeError(f"pdftoppm returned success but rendered no PNG pages for {pdf}")
     marker.touch()
 
 

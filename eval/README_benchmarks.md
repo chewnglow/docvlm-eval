@@ -39,6 +39,9 @@ fetches fallback rendered images for them.
 
 The script is resumable. Completed archive extraction and PDF rendering are
 tracked with marker files, so rerunning the same command skips finished work.
+Known non-fatal Poppler ligature-name warnings from embedded icon fonts are
+collapsed into one warning count per PDF. Other Poppler diagnostics are kept,
+and a render is marked complete only when at least one page PNG was produced.
 
 Useful variants:
 
