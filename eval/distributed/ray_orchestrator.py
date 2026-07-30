@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
-import math
 import os
 from pathlib import Path
 import re
@@ -56,39 +55,68 @@ class ClusterNode:
 
 
 @dataclass(frozen=True)
+class ModelAllocation:
+    group: str
+    model_key: str
+    devices: int
+
+
+@dataclass(frozen=True)
 class NodeAssignment:
     family: str
     model_key: str
     node_id: str
     node_ip: str
     node_rank: int
+    group_devices: int
+    group_nodes: int
     local_devices: int
+    device_offset: int
     reserved_devices: int
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Launch Qwen and Step evaluation groups across an existing Ray cluster. "
-            "Run this once through Ray Jobs or on the Ray head node."
+            "Launch Qwen/Step instruct and base evaluation groups across an "
+            "existing Ray cluster. Run this once through Ray Jobs or on the "
+            "Ray head node."
         )
     )
     parser.add_argument("--address", default="auto", help="Ray address; default: auto")
-    parser.add_argument("--total-devices", type=int, required=True)
-    parser.add_argument("--qwen-devices", type=int)
-    parser.add_argument("--step-devices", type=int)
-    parser.add_argument("--node-capacity", type=int, default=8)
+    parser.add_argument(
+        "--total-devices",
+        type=int,
+        required=True,
+        help="Total NPUs to allocate across all selected model groups (16..128).",
+    )
+    parser.add_argument("--qwen-devices", type=int, help="Qwen3.5-9B allocation.")
+    parser.add_argument("--qwen-base-devices", type=int, help="Qwen3.5-9B-Base allocation.")
+    parser.add_argument("--step-devices", type=int, help="Step3VL-10B allocation.")
+    parser.add_argument("--step-base-devices", type=int, help="Step3VL-10B-Base allocation.")
+    parser.add_argument(
+        "--node-capacity",
+        type=int,
+        default=8,
+        help="Maximum NPUs the orchestrator may use on one compute node.",
+    )
     parser.add_argument(
         "--resource-key",
         default="NPU",
         help="Ray custom resource advertised by each Ascend compute node.",
     )
     parser.add_argument("--qwen-model-key", default="qwen3.5-9b")
+    parser.add_argument("--qwen-base-model-key", default="qwen3.5-9b-base")
     parser.add_argument("--step-model-key", default="step3vl-10b")
+    parser.add_argument("--step-base-model-key", default="step3vl-10b-base")
     parser.add_argument("--qwen-model-path")
+    parser.add_argument("--qwen-base-model-path")
     parser.add_argument("--step-model-path")
+    parser.add_argument("--step-base-model-path")
     parser.add_argument("--qwen-served-model-name")
+    parser.add_argument("--qwen-base-served-model-name")
     parser.add_argument("--step-served-model-name")
+    parser.add_argument("--step-base-served-model-name")
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--dataset-root", required=True)
     parser.add_argument(
@@ -117,34 +145,68 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_split(
+def resolve_allocations(
     total_devices: int,
     qwen_devices: int | None,
+    qwen_base_devices: int | None,
     step_devices: int | None,
-) -> tuple[int, int]:
+    step_base_devices: int | None,
+    *,
+    qwen_model_key: str,
+    qwen_base_model_key: str,
+    step_model_key: str,
+    step_base_model_key: str,
+) -> list[ModelAllocation]:
     if not MIN_TOTAL_DEVICES <= total_devices <= MAX_TOTAL_DEVICES:
         raise ValueError(
             f"TOTAL_DEVICES must be between {MIN_TOTAL_DEVICES} and "
             f"{MAX_TOTAL_DEVICES}, got {total_devices}"
         )
-    if qwen_devices is None and step_devices is None:
-        qwen_devices = (total_devices + 1) // 2
-        step_devices = total_devices - qwen_devices
-    elif qwen_devices is None:
-        qwen_devices = total_devices - int(step_devices)
-    elif step_devices is None:
-        step_devices = total_devices - int(qwen_devices)
 
-    qwen_devices = int(qwen_devices)
-    step_devices = int(step_devices)
-    if qwen_devices < 1 or step_devices < 1:
-        raise ValueError("Ray orchestration requires at least one device for each model group")
-    if qwen_devices + step_devices != total_devices:
+    values = (qwen_devices, qwen_base_devices, step_devices, step_base_devices)
+    if all(value is None for value in values):
+        base, remainder = divmod(total_devices, 4)
+        counts = [base + (index < remainder) for index in range(4)]
+    elif qwen_base_devices is None and step_base_devices is None:
+        # Compatibility mode for the original two-model Ray command.
+        if qwen_devices is None and step_devices is None:
+            qwen_devices = (total_devices + 1) // 2
+            step_devices = total_devices - qwen_devices
+        elif qwen_devices is None:
+            qwen_devices = total_devices - int(step_devices)
+        elif step_devices is None:
+            step_devices = total_devices - int(qwen_devices)
+        counts = [int(qwen_devices), 0, int(step_devices), 0]
+    else:
+        if any(value is None for value in values):
+            raise ValueError(
+                "For a custom four-model allocation, set all of "
+                "--qwen-devices, --qwen-base-devices, --step-devices, and "
+                "--step-base-devices"
+            )
+        counts = [int(value) for value in values]
+
+    if any(count < 0 for count in counts):
+        raise ValueError("Model device allocations must be >= 0")
+    if sum(counts) != total_devices:
         raise ValueError(
-            "QWEN_DEVICES + STEP_DEVICES must equal TOTAL_DEVICES: "
-            f"{qwen_devices} + {step_devices} != {total_devices}"
+            f"Model device allocations must sum to TOTAL_DEVICES: "
+            f"{sum(counts)} != {total_devices}"
         )
-    return qwen_devices, step_devices
+    specs = (
+        ("qwen", qwen_model_key),
+        ("qwen-base", qwen_base_model_key),
+        ("step", step_model_key),
+        ("step-base", step_base_model_key),
+    )
+    allocations = [
+        ModelAllocation(group=group, model_key=model_key, devices=count)
+        for (group, model_key), count in zip(specs, counts)
+        if count
+    ]
+    if not allocations:
+        raise ValueError("At least one model must receive devices")
+    return allocations
 
 
 def discover_compute_nodes(
@@ -172,53 +234,58 @@ def discover_compute_nodes(
 def build_assignments(
     nodes: list[ClusterNode],
     *,
-    qwen_devices: int,
-    step_devices: int,
+    allocations: list[ModelAllocation],
     node_capacity: int,
-    qwen_model_key: str,
-    step_model_key: str,
 ) -> list[NodeAssignment]:
     if node_capacity < 1:
         raise ValueError("NODE_DEVICE_CAPACITY must be >= 1")
 
-    group_specs = (
-        ("qwen", qwen_model_key, qwen_devices),
-        ("step", step_model_key, step_devices),
-    )
-    required_nodes = sum(math.ceil(devices / node_capacity) for _, _, devices in group_specs)
-    eligible = [node for node in nodes if node.capacity >= node_capacity]
-    if len(eligible) < required_nodes:
+    eligible = [
+        (node, min(node.capacity, node_capacity))
+        for node in nodes
+        if min(node.capacity, node_capacity) > 0
+    ]
+    requested_devices = sum(allocation.devices for allocation in allocations)
+    available_devices = sum(capacity for _, capacity in eligible)
+    if available_devices < requested_devices:
         capacities = ", ".join(f"{node.node_ip}:{node.capacity}" for node in nodes) or "none"
         raise ValueError(
-            f"Need {required_nodes} compute nodes with at least {node_capacity} "
-            f"devices each; found {len(eligible)}. "
+            f"Need {requested_devices} devices with at most {node_capacity} used "
+            f"per node; found {available_devices}. "
             f"Advertised capacities: {capacities}"
         )
 
     assignments: list[NodeAssignment] = []
     node_index = 0
-    for family, model_key, group_devices in group_specs:
-        remaining = group_devices
-        node_rank = 0
+    node_used = 0
+    for allocation in allocations:
+        remaining = allocation.devices
+        chunks: list[tuple[ClusterNode, int, int]] = []
         while remaining:
-            node = eligible[node_index]
-            local_devices = min(node_capacity, remaining)
+            node, usable_capacity = eligible[node_index]
+            free_devices = usable_capacity - node_used
+            local_devices = min(free_devices, remaining)
+            chunks.append((node, node_used, local_devices))
+            node_used += local_devices
+            if node_used == usable_capacity:
+                node_index += 1
+                node_used = 0
+            remaining -= local_devices
+        for node_rank, (node, device_offset, local_devices) in enumerate(chunks):
             assignments.append(
                 NodeAssignment(
-                    family=family,
-                    model_key=model_key,
+                    family=allocation.group,
+                    model_key=allocation.model_key,
                     node_id=node.node_id,
                     node_ip=node.node_ip,
                     node_rank=node_rank,
+                    group_devices=allocation.devices,
+                    group_nodes=len(chunks),
                     local_devices=local_devices,
-                    # Reserve the complete node so another experiment cannot use
-                    # devices left idle by a partial final model-group node.
-                    reserved_devices=node.capacity,
+                    device_offset=device_offset,
+                    reserved_devices=local_devices,
                 )
             )
-            node_index += 1
-            node_rank += 1
-            remaining -= local_devices
     return assignments
 
 
@@ -250,8 +317,6 @@ def build_node_environment(
     assignment: NodeAssignment,
     *,
     total_devices: int,
-    qwen_devices: int,
-    step_devices: int,
     node_capacity: int,
     output_root: str,
     dataset_root: str,
@@ -263,15 +328,19 @@ def build_node_environment(
     env = dict(common_env)
     node_name = safe_node_name(assignment)
     control_root = Path(output_root) / "_ray_nodes" / assignment.model_key / node_name
+    base_port = int(common_env.get("BASE_PORT", "8000")) + assignment.device_offset
     env.update(
         {
             "TOTAL_DEVICES": str(total_devices),
-            "QWEN_DEVICES": str(qwen_devices),
-            "STEP_DEVICES": str(step_devices),
+            "MODEL_GROUP_DEVICE_COUNT": str(assignment.group_devices),
+            "MODEL_GROUP_NODE_COUNT": str(assignment.group_nodes),
             "NODE_DEVICE_CAPACITY": str(node_capacity),
             "NODE_RANK": str(assignment.node_rank),
             "NODE_ID": node_name,
+            "LOCAL_DEVICE_COUNT": str(assignment.local_devices),
             "DEVICES_PER_NODE": str(assignment.local_devices),
+            "DEVICE_OFFSET": str(assignment.device_offset),
+            "BASE_PORT": str(base_port),
             "MODEL_KEY": assignment.model_key,
             "OUTPUT_ROOT": output_root,
             "DATASET_ROOT": dataset_root,
@@ -308,7 +377,8 @@ def run_node_suite(
     env.update(node_env)
     print(
         f"[ray-node] {assignment.node_ip}: {assignment.model_key}, "
-        f"rank={assignment.node_rank}, devices={assignment.local_devices}",
+        f"rank={assignment.node_rank}, devices={assignment.local_devices}, "
+        f"offset={assignment.device_offset}",
         flush=True,
     )
     try:
@@ -333,6 +403,7 @@ def print_plan(assignments: list[NodeAssignment], resource_key: str) -> None:
         print(
             f"  {assignment.node_ip:<15} {assignment.family:<5} "
             f"rank={assignment.node_rank:<2} devices={assignment.local_devices} "
+            f"offset={assignment.device_offset} "
             f"reserve={assignment.reserved_devices}"
         )
 
@@ -340,15 +411,26 @@ def print_plan(assignments: list[NodeAssignment], resource_key: str) -> None:
 def main() -> None:
     args = parse_args()
     try:
-        qwen_devices, step_devices = resolve_split(
+        allocations = resolve_allocations(
             args.total_devices,
             args.qwen_devices,
+            args.qwen_base_devices,
             args.step_devices,
+            args.step_base_devices,
+            qwen_model_key=args.qwen_model_key,
+            qwen_base_model_key=args.qwen_base_model_key,
+            step_model_key=args.step_model_key,
+            step_base_model_key=args.step_base_model_key,
         )
         validate_data_paths(
             args.output_root,
             args.dataset_root,
-            (args.qwen_model_path, args.step_model_path),
+            (
+                args.qwen_model_path,
+                args.qwen_base_model_path,
+                args.step_model_path,
+                args.step_base_model_path,
+            ),
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -367,11 +449,8 @@ def main() -> None:
         nodes = discover_compute_nodes(ray.nodes(), args.resource_key)
         assignments = build_assignments(
             nodes,
-            qwen_devices=qwen_devices,
-            step_devices=step_devices,
+            allocations=allocations,
             node_capacity=args.node_capacity,
-            qwen_model_key=args.qwen_model_key,
-            step_model_key=args.step_model_key,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -381,20 +460,19 @@ def main() -> None:
         return
 
     common_env = forwarded_environment()
+    model_options = {
+        "qwen": (args.qwen_model_path, args.qwen_served_model_name),
+        "qwen-base": (args.qwen_base_model_path, args.qwen_base_served_model_name),
+        "step": (args.step_model_path, args.step_served_model_name),
+        "step-base": (args.step_base_model_path, args.step_base_served_model_name),
+    }
     remote_runner = ray.remote(max_retries=0, num_cpus=0)(run_node_suite)
     futures: list[Any] = []
     for assignment in assignments:
-        if assignment.family == "qwen":
-            model_path = args.qwen_model_path
-            served_model_name = args.qwen_served_model_name
-        else:
-            model_path = args.step_model_path
-            served_model_name = args.step_served_model_name
+        model_path, served_model_name = model_options[assignment.family]
         node_env = build_node_environment(
             assignment,
             total_devices=args.total_devices,
-            qwen_devices=qwen_devices,
-            step_devices=step_devices,
             node_capacity=args.node_capacity,
             output_root=args.output_root,
             dataset_root=args.dataset_root,

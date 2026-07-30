@@ -62,26 +62,40 @@ ray job submit \
   -- \
   python eval/distributed/ray_orchestrator.py \
     --total-devices 128 \
-    --qwen-devices 64 \
-    --step-devices 64 \
     --node-capacity 8 \
     --output-root /shared/docvlm_eval \
     --dataset-root /data/docvlm/dataset \
     --python /opt/docvlm/bin/python \
     --qwen-model-path /models/Qwen3.5-9B \
-    --step-model-path /models/Step3VL10B
+    --qwen-base-model-path /models/Qwen3.5-9B-Base \
+    --step-model-path /models/Step3VL10B \
+    --step-base-model-path /models/Step3VL10B-base
 ```
 
 The head node may be CPU-only. Only live nodes advertising the `NPU` resource
-are selected. The orchestrator assigns distinct nodes to each model group,
-launches both groups concurrently, and cleans up their vLLM servers at the end.
-Use `--dry-run` to print the assignment without launching.
+are selected. By default, the orchestrator divides the devices evenly among
+Qwen3.5-9B, Qwen3.5-9B-Base, Step3VL-10B, and Step3VL-10B-Base. It assigns
+non-overlapping device ranges to each model group, launches all four groups
+concurrently, and cleans up their vLLM servers at the end. Groups smaller than
+one node may safely share a physical node because their device visibility and
+ports are offset. Use `--dry-run` to print the assignment without launching.
+
+For a custom split, set all four values and make their sum equal
+`--total-devices`:
+
+```bash
+--qwen-devices 24 \
+--qwen-base-devices 24 \
+--step-devices 40 \
+--step-base-devices 40
+```
 
 The Ray working-directory upload excludes datasets, models, outputs, and virtual
 environments through the repository's `.rayignore`. Data and models must be
 mounted at consistent paths, and `OUTPUT_ROOT` must be shared by all nodes.
 
-The remaining commands in this section are the manual per-node alternative.
+The remaining commands in this section are the original manual two-model
+alternative.
 
 Set `TOTAL_DEVICES` to any integer from 16 through 128. By default the planner
 splits the devices evenly between the two models, giving the extra device to
@@ -383,8 +397,12 @@ bash eval/distributed/stop_vllm_servers.sh
 - `VLLM_EXTRA_ARGS`: append extra vLLM flags without editing scripts.
 - `SCORE_EXTRA_ARGS`: append scoring flags, e.g. answer extraction via an API.
 - `DEVICE_TYPE`: `cuda` (default) or `ascend`; Ascend uses `ASCEND_RT_VISIBLE_DEVICES`.
-- `TOTAL_DEVICES`: total two-model fleet size; required by the Ascend suite and validated in `[16, 128]`.
-- `QWEN_DEVICES`, `STEP_DEVICES`: optional model allocations; their sum must equal `TOTAL_DEVICES`.
+- `TOTAL_DEVICES`: total active fleet size, validated in `[16, 128]`.
+- Ray defaults to four equal model allocations. Override them with
+  `--qwen-devices`, `--qwen-base-devices`, `--step-devices`, and
+  `--step-base-devices`; their sum must equal `TOTAL_DEVICES`.
+- Manual mode retains `QWEN_DEVICES` and `STEP_DEVICES` as its two model-family
+  allocations.
 - `NODE_DEVICE_CAPACITY`: maximum devices available on one node, normally `8`.
 - `DEVICES_PER_NODE`: computed active local count in queue mode; still accepted directly by lower-level launchers.
 - `MAX_RECORDS_PER_TASK`: document-affinity/straggler tradeoff in queue mode; default `4`.

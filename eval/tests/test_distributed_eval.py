@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -67,25 +68,122 @@ class DistributedEvalTests(unittest.TestCase):
         self.assertEqual([node.node_id for node in nodes], ["worker-b", "worker-a"])
         self.assertEqual([node.capacity for node in nodes], [8, 8])
 
-    def test_ray_assigns_distinct_nodes_to_both_model_groups(self) -> None:
+    def test_ray_defaults_to_all_four_models(self) -> None:
+        allocations = ray_orchestrator.resolve_allocations(
+            128,
+            None,
+            None,
+            None,
+            None,
+            qwen_model_key="qwen3.5-9b",
+            qwen_base_model_key="qwen3.5-9b-base",
+            step_model_key="step3vl-10b",
+            step_base_model_key="step3vl-10b-base",
+        )
+        self.assertEqual(
+            [(allocation.group, allocation.devices) for allocation in allocations],
+            [
+                ("qwen", 32),
+                ("qwen-base", 32),
+                ("step", 32),
+                ("step-base", 32),
+            ],
+        )
+        small_allocations = ray_orchestrator.resolve_allocations(
+            16,
+            None,
+            None,
+            None,
+            None,
+            qwen_model_key="qwen3.5-9b",
+            qwen_base_model_key="qwen3.5-9b-base",
+            step_model_key="step3vl-10b",
+            step_base_model_key="step3vl-10b-base",
+        )
+        packed = ray_orchestrator.build_assignments(
+            [
+                ray_orchestrator.ClusterNode("node-1", "10.0.0.1", 8),
+                ray_orchestrator.ClusterNode("node-2", "10.0.0.2", 8),
+            ],
+            allocations=small_allocations,
+            node_capacity=8,
+        )
+        self.assertEqual(len({item.node_id for item in packed}), 2)
+        self.assertEqual(
+            [(item.local_devices, item.device_offset) for item in packed],
+            [(4, 0), (4, 4), (4, 0), (4, 4)],
+        )
+
+    def test_ray_preserves_explicit_legacy_two_model_allocation(self) -> None:
+        allocations = ray_orchestrator.resolve_allocations(
+            96,
+            32,
+            None,
+            64,
+            None,
+            qwen_model_key="qwen3.5-9b",
+            qwen_base_model_key="qwen3.5-9b-base",
+            step_model_key="step3vl-10b",
+            step_base_model_key="step3vl-10b-base",
+        )
+        self.assertEqual(
+            [(allocation.group, allocation.devices) for allocation in allocations],
+            [("qwen", 32), ("step", 64)],
+        )
+
+    def test_ray_accepts_custom_four_model_allocation(self) -> None:
+        allocations = ray_orchestrator.resolve_allocations(
+            128,
+            24,
+            24,
+            40,
+            40,
+            qwen_model_key="qwen3.5-9b",
+            qwen_base_model_key="qwen3.5-9b-base",
+            step_model_key="step3vl-10b",
+            step_base_model_key="step3vl-10b-base",
+        )
+        self.assertEqual(
+            [allocation.devices for allocation in allocations],
+            [24, 24, 40, 40],
+        )
+        with self.assertRaises(ValueError):
+            ray_orchestrator.resolve_allocations(
+                128,
+                24,
+                24,
+                40,
+                None,
+                qwen_model_key="qwen3.5-9b",
+                qwen_base_model_key="qwen3.5-9b-base",
+                step_model_key="step3vl-10b",
+                step_base_model_key="step3vl-10b-base",
+            )
+
+    def test_ray_assigns_distinct_nodes_to_all_model_groups(self) -> None:
         nodes = [
             ray_orchestrator.ClusterNode(f"node-{index}", f"10.0.0.{index}", 8)
             for index in range(1, 17)
         ]
+        allocations = [
+            ray_orchestrator.ModelAllocation("qwen", "qwen3.5-9b", 32),
+            ray_orchestrator.ModelAllocation("qwen-base", "qwen3.5-9b-base", 32),
+            ray_orchestrator.ModelAllocation("step", "step3vl-10b", 32),
+            ray_orchestrator.ModelAllocation("step-base", "step3vl-10b-base", 32),
+        ]
         assignments = ray_orchestrator.build_assignments(
             nodes,
-            qwen_devices=32,
-            step_devices=64,
+            allocations=allocations,
             node_capacity=8,
-            qwen_model_key="qwen3.5-9b",
-            step_model_key="step3vl-10b",
         )
-        self.assertEqual(len(assignments), 12)
+        self.assertEqual(len(assignments), 16)
         self.assertEqual([item.family for item in assignments[:4]], ["qwen"] * 4)
-        self.assertEqual([item.family for item in assignments[4:]], ["step"] * 8)
+        self.assertEqual([item.family for item in assignments[4:8]], ["qwen-base"] * 4)
+        self.assertEqual([item.family for item in assignments[8:12]], ["step"] * 4)
+        self.assertEqual([item.family for item in assignments[12:]], ["step-base"] * 4)
         self.assertEqual([item.node_rank for item in assignments[:4]], list(range(4)))
-        self.assertEqual([item.node_rank for item in assignments[4:]], list(range(8)))
-        self.assertEqual(len({item.node_id for item in assignments}), 12)
+        self.assertEqual([item.node_rank for item in assignments[12:]], list(range(4)))
+        self.assertEqual(len({item.node_id for item in assignments}), 16)
 
     def test_ray_assignment_supports_partial_final_node(self) -> None:
         nodes = [
@@ -94,32 +192,41 @@ class DistributedEvalTests(unittest.TestCase):
         ]
         assignments = ray_orchestrator.build_assignments(
             nodes,
-            qwen_devices=10,
-            step_devices=10,
+            allocations=[
+                ray_orchestrator.ModelAllocation("qwen", "qwen3.5-9b", 10),
+                ray_orchestrator.ModelAllocation("step", "step3vl-10b", 10),
+            ],
             node_capacity=8,
-            qwen_model_key="qwen3.5-9b",
-            step_model_key="step3vl-10b",
         )
         self.assertEqual(
-            [(item.family, item.local_devices) for item in assignments],
-            [("qwen", 8), ("qwen", 2), ("step", 8), ("step", 2)],
+            [(item.family, item.local_devices, item.device_offset) for item in assignments],
+            [
+                ("qwen", 8, 0),
+                ("qwen", 2, 0),
+                ("step", 6, 2),
+                ("step", 4, 0),
+            ],
         )
-        self.assertTrue(all(item.reserved_devices == 8 for item in assignments))
+        self.assertEqual(len({item.node_id for item in assignments}), 3)
+        self.assertEqual(
+            [item.reserved_devices for item in assignments],
+            [8, 2, 6, 4],
+        )
 
-    def test_ray_reserves_all_advertised_devices_on_selected_node(self) -> None:
+    def test_ray_reserves_only_devices_used_by_each_launcher(self) -> None:
         nodes = [
             ray_orchestrator.ClusterNode("node-1", "10.0.0.1", 16),
             ray_orchestrator.ClusterNode("node-2", "10.0.0.2", 16),
         ]
         assignments = ray_orchestrator.build_assignments(
             nodes,
-            qwen_devices=8,
-            step_devices=8,
+            allocations=[
+                ray_orchestrator.ModelAllocation("qwen", "qwen3.5-9b", 8),
+                ray_orchestrator.ModelAllocation("step", "step3vl-10b", 8),
+            ],
             node_capacity=8,
-            qwen_model_key="qwen3.5-9b",
-            step_model_key="step3vl-10b",
         )
-        self.assertEqual([item.reserved_devices for item in assignments], [16, 16])
+        self.assertEqual([item.reserved_devices for item in assignments], [8, 8])
 
     def test_ray_node_environment_sets_rank_and_model_without_leaking_env(self) -> None:
         assignment = ray_orchestrator.NodeAssignment(
@@ -128,7 +235,10 @@ class DistributedEvalTests(unittest.TestCase):
             node_id="node-1",
             node_ip="10.0.0.1",
             node_rank=2,
+            group_devices=20,
+            group_nodes=3,
             local_devices=4,
+            device_offset=2,
             reserved_devices=8,
         )
         common = ray_orchestrator.forwarded_environment(
@@ -141,8 +251,6 @@ class DistributedEvalTests(unittest.TestCase):
         env = ray_orchestrator.build_node_environment(
             assignment,
             total_devices=20,
-            qwen_devices=10,
-            step_devices=10,
             node_capacity=8,
             output_root="/shared/results",
             dataset_root="/data/dataset",
@@ -151,7 +259,11 @@ class DistributedEvalTests(unittest.TestCase):
             model_path="/models/qwen",
         )
         self.assertEqual(env["NODE_RANK"], "2")
+        self.assertEqual(env["MODEL_GROUP_DEVICE_COUNT"], "20")
+        self.assertEqual(env["MODEL_GROUP_NODE_COUNT"], "3")
         self.assertEqual(env["DEVICES_PER_NODE"], "4")
+        self.assertEqual(env["DEVICE_OFFSET"], "2")
+        self.assertEqual(env["BASE_PORT"], "8002")
         self.assertEqual(env["MODEL_PATH"], "/models/qwen")
         self.assertEqual(env["BENCHMARKS"], "slidevqa:val")
         self.assertTrue(env["LOG_DIR"].startswith("/shared/results/_ray_nodes/"))
@@ -179,7 +291,10 @@ class DistributedEvalTests(unittest.TestCase):
             node_id="node-1",
             node_ip="10.0.0.1",
             node_rank=0,
+            group_devices=8,
+            group_nodes=1,
             local_devices=8,
+            device_offset=0,
             reserved_devices=8,
         )
         with tempfile.TemporaryDirectory() as temp:
@@ -211,7 +326,10 @@ class DistributedEvalTests(unittest.TestCase):
             node_id="node-1",
             node_ip="10.0.0.1",
             node_rank=0,
+            group_devices=8,
+            group_nodes=1,
             local_devices=8,
+            device_offset=0,
             reserved_devices=8,
         )
         with tempfile.TemporaryDirectory() as temp:
@@ -235,6 +353,56 @@ class DistributedEvalTests(unittest.TestCase):
                         keep_servers=False,
                     )
         self.assertEqual(run.call_count, 2)
+
+    def test_ascend_launcher_accepts_direct_base_model_group_size(self) -> None:
+        script = DIST_DIR / "run_ascend_queue_eval.sh"
+        env = os.environ.copy()
+        env.update(
+            {
+                "MODEL_KEY": "qwen3.5-9b-base",
+                "DATASET": "slidevqa",
+                "MODEL_GROUP_DEVICE_COUNT": "4",
+                "MODEL_GROUP_NODE_COUNT": "1",
+                "LOCAL_DEVICE_COUNT": "4",
+                "NODE_DEVICE_CAPACITY": "8",
+                "NODE_RANK": "1",
+                "TOTAL_DEVICES": "16",
+            }
+        )
+        completed = subprocess.run(
+            ["bash", str(script)],
+            cwd=EVAL_DIR.parent,
+            env=env,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("nothing to run", completed.stdout)
+
+    def test_base_model_presets_have_distinct_served_names(self) -> None:
+        preset = DIST_DIR / "model_presets.sh"
+        with tempfile.TemporaryDirectory() as temp:
+            served_names = []
+            for model_key in ("qwen3.5-9b-base", "step3vl-10b-base"):
+                command = (
+                    f"source {preset!s}; "
+                    f"MODEL_PATH={temp!s}; "
+                    f"resolve_model_preset {model_key}; "
+                    'echo "$SERVED_MODEL_NAME"'
+                )
+                completed = subprocess.run(
+                    ["bash", "-c", command],
+                    cwd=EVAL_DIR.parent,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                served_names.append(completed.stdout.strip())
+        self.assertEqual(served_names, ["Qwen3.5-9B-Base", "Step3VL10B-Base"])
 
     def test_device_plan_scales_from_16_to_128(self) -> None:
         for total in (16, 32, 48, 96, 127, 128):

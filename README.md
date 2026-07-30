@@ -1,6 +1,13 @@
 # Document VQA Evaluation
 
-This repository evaluates Qwen3.5-9B and Step3VL-10B on:
+This repository evaluates four model variants:
+
+- Qwen3.5-9B
+- Qwen3.5-9B-Base
+- Step3VL-10B
+- Step3VL-10B-Base
+
+across:
 
 - MMLongBench-Doc
 - LongDocURL
@@ -121,9 +128,9 @@ All nodes in one model group must see the same model path.
 
 Use Ray when the cluster or rental platform exposes a Ray dashboard/job endpoint.
 The orchestrator is submitted once and performs the per-node launch automatically.
-It discovers live compute nodes, divides them between Qwen and Step, assigns
-node-local ranks, reserves the advertised NPU capacity, and pins one suite
-launcher to every selected node.
+It discovers live compute nodes, divides their NPUs among the four model variants,
+assigns node-local ranks, reserves the advertised NPU capacity, and pins one
+suite launcher to every selected node.
 
 Ray must already be running on the allocated nodes. Advertise the Ascend devices
 as a custom `NPU` resource when starting each compute node. A CPU-only head node
@@ -152,15 +159,15 @@ ray job submit \
   -- \
   python eval/distributed/ray_orchestrator.py \
     --total-devices 128 \
-    --qwen-devices 64 \
-    --step-devices 64 \
     --node-capacity 8 \
     --resource-key NPU \
     --output-root /shared/docvlm_eval \
     --dataset-root /data/docvlm/dataset \
     --python /opt/docvlm/bin/python \
     --qwen-model-path /models/Qwen3.5-9B \
-    --step-model-path /models/Step3VL10B
+    --qwen-base-model-path /models/Qwen3.5-9B-Base \
+    --step-model-path /models/Step3VL10B \
+    --step-base-model-path /models/Step3VL10B-base
 ```
 
 In a web form that already supplies the Ray cluster and source working
@@ -173,13 +180,41 @@ python eval/distributed/ray_orchestrator.py \
   --dataset-root /data/docvlm/dataset \
   --python /opt/docvlm/bin/python \
   --qwen-model-path /models/Qwen3.5-9B \
-  --step-model-path /models/Step3VL10B
+  --qwen-base-model-path /models/Qwen3.5-9B-Base \
+  --step-model-path /models/Step3VL10B \
+  --step-base-model-path /models/Step3VL10B-base
 ```
 
+With no device-allocation flags, Ray divides the fleet as evenly as possible:
+
+| `TOTAL_DEVICES` | Qwen | Qwen Base | Step | Step Base |
+|---:|---:|---:|---:|---:|
+| 16 | 4 | 4 | 4 | 4 |
+| 48 | 12 | 12 | 12 | 12 |
+| 96 | 24 | 24 | 24 | 24 |
+| 128 | 32 | 32 | 32 | 32 |
+
+Allocations smaller than one node are packed into non-overlapping device ranges.
+For example, the 16-device configuration runs two four-NPU model groups on each
+eight-NPU node. Device visibility and server ports are offset automatically.
+
+Override all four values when one model needs more capacity:
+
+```bash
+--qwen-devices 24 \
+--qwen-base-devices 24 \
+--step-devices 40 \
+--step-base-devices 40
+```
+
+The four values must sum to `--total-devices`. For backward compatibility,
+setting only `--qwen-devices` and `--step-devices` selects the original
+two-model run and omits both base models.
+
 Use `--dry-run` to verify the discovered nodes and model allocation without
-starting vLLM. Qwen and Step run concurrently on separate node groups; each
-group runs its configured `BENCHMARKS` in sequence while all nodes assigned to
-that group pull evaluation work concurrently.
+starting vLLM. All four variants run concurrently in isolated device groups;
+each group runs its configured `BENCHMARKS` in sequence while all devices
+assigned to that group pull evaluation work concurrently.
 
 The source tree is uploaded by Ray Jobs. `.rayignore` excludes `dataset/`,
 `models/`, `outputs/`, and `.venv/` so multi-gigabyte artifacts are not included.
@@ -187,11 +222,11 @@ Those directories must instead be mounted or staged on every compute node. In
 particular:
 
 - `--output-root` must be one shared filesystem path visible to every node;
-- `--dataset-root` and both model paths must exist at the same paths on the
+- `--dataset-root` and all four model paths must exist at the same paths on the
   nodes that run them;
 - the Python/vLLM-Ascend environment must already exist on every node;
-- every compute node must advertise at least `--node-capacity` units of the
-  selected Ray resource.
+- every compute node must advertise its actual NPU count through the selected
+  Ray resource; `--node-capacity` limits how many of those NPUs may be used.
 
 The orchestrator stops the vLLM servers when the suite finishes. Pass
 `--keep-servers` to retain them. If a node launcher fails, successful responses
@@ -202,10 +237,11 @@ the run. Per-node server logs and PID files are retained under
 The manual per-node procedure below remains available when the platform does
 not provide Ray.
 
-### Device allocation
+### Manual two-model device allocation
 
-`TOTAL_DEVICES` is the size of the complete two-model fleet and must be between
-16 and 128. The default split is as even as possible:
+The manual launcher below retains its original Qwen-instruct/Step-instruct
+two-model planner. `TOTAL_DEVICES` must be between 16 and 128, and the default
+split is as even as possible:
 
 | `TOTAL_DEVICES` | Qwen replicas | Step replicas |
 |---:|---:|---:|
@@ -213,6 +249,10 @@ not provide Ray.
 | 48 | 24 | 24 |
 | 96 | 48 | 48 |
 | 128 | 64 | 64 |
+
+The base presets are also valid manual `MODEL_KEY` values. Run
+`qwen3.5-9b-base` or `step3vl-10b-base` as a separate manual model group when
+Ray orchestration is unavailable.
 
 Override the split if one model is slower:
 
@@ -440,6 +480,8 @@ outputs/distributed/<run-name>/
 - `IMAGE_DATA_CACHE_MB`: per-worker encoded-image cache; default `256` MB.
 - `MM_PROCESSOR_CACHE_GB`: vLLM multimodal processor cache per instance.
 - `LEASE_SECONDS`: time before an un-heartbeated task is considered abandoned; default one hour.
+- Ray model allocations: `--qwen-devices`, `--qwen-base-devices`,
+  `--step-devices`, and `--step-base-devices`.
 - `VLLM_EXTRA_ARGS`: extra arguments appended to `vllm serve`.
 - `SCORE_EXTRA_ARGS`: extra arguments passed to the scorer.
 

@@ -18,6 +18,7 @@ NODE_ID="${NODE_ID:-node-${NODE_RANK}}"
 DEVICES_PER_NODE="${DEVICES_PER_NODE:-${GPUS_PER_NODE:-8}}"
 DEVICE_TYPE="${DEVICE_TYPE:-cuda}"
 BASE_PORT="${BASE_PORT:-8000}"
+DEVICE_OFFSET="${DEVICE_OFFSET:-0}"
 HOST="${HOST:-0.0.0.0}"
 TP_SIZE="${TP_SIZE:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
@@ -43,6 +44,7 @@ mkdir -p "${LOG_DIR}" "${PID_DIR}"
 echo "Launching ${DEVICES_PER_NODE} ${DEVICE_TYPE} vLLM servers for ${SERVED_MODEL_NAME} on ${NODE_ID}"
 for LOCAL_RANK in $(seq 0 $((DEVICES_PER_NODE - 1))); do
   PORT=$((BASE_PORT + LOCAL_RANK))
+  DEVICE_INDEX=$((DEVICE_OFFSET + LOCAL_RANK))
   LOG_FILE="${LOG_DIR}/device-${LOCAL_RANK}.log"
   PID_FILE="${PID_DIR}/device-${LOCAL_RANK}.pid"
   if [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
@@ -50,10 +52,10 @@ for LOCAL_RANK in $(seq 0 $((DEVICES_PER_NODE - 1))); do
     continue
   fi
 
-  echo "Device ${LOCAL_RANK}: port ${PORT}, log ${LOG_FILE}"
+  echo "Device ${DEVICE_INDEX}: port ${PORT}, log ${LOG_FILE}"
   (
     cd "${ROOT_DIR}"
-    export "${VISIBILITY_ENV}=${LOCAL_RANK}"
+    export "${VISIBILITY_ENV}=${DEVICE_INDEX}"
     SERVER_EXTRA_ARGS=(--mm-processor-cache-gb "${MM_PROCESSOR_CACHE_GB}")
     if [[ "${ENABLE_PREFIX_CACHING}" == "1" ]]; then
       SERVER_EXTRA_ARGS+=(--enable-prefix-caching)
