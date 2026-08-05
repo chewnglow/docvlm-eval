@@ -171,7 +171,41 @@ Start conservatively at concurrency 2 for full, long image documents. Sweep
 pilot, then use the setting with the highest completed samples/hour/NPU. For
 shorter capped-image pilots, 4 or 8 can be better.
 
-Monitor a live run from any node:
+Monitor the complete suite from any machine that can read the shared output root:
+
+```bash
+$PYTHON eval/distributed/progress_monitor.py \
+  --output-root /shared/docvlm_eval \
+  --watch 10
+```
+
+This is the primary monitoring interface. It shows overall progress and ETA, one
+row for every model/benchmark sub-experiment (including benchmarks not started
+yet), task and record progress, excluded failures, throughput, and a row for every
+active NPU/GPU with HBM/VRAM occupation. Model groups are treated as concurrent;
+benchmarks within one model group are treated as sequential when calculating the
+overall ETA. Waiting-experiment ETAs use that model's measured rate and carry a
+`~` prefix. ETA remains `--` while a model has not completed enough work to
+measure a rate.
+
+An experiment remaining without metrics for more than ten minutes after its
+queue drains is marked `UNSCORED`, and the overall suite state changes to
+`ATTENTION`.
+
+The experiment table's `TASK S/A/P` column means settled, active, and pending
+queue tasks; `EXCL` is the number of terminally failed records excluded from the
+reported score.
+
+Options:
+
+- `--watch 10`: refresh in place every ten seconds;
+- `--json`: emit one machine-readable snapshot;
+- `--hide-devices`: show experiment and overall progress without the full device
+  table;
+- `--eta-window-minutes 30`: tune recent-throughput smoothing;
+- `--memory-max-age 120`: control when a device sample is considered stale.
+
+For a compact check of one experiment only:
 
 ```bash
 RUN_DIR=/shared/docvlm_eval/Qwen3.5-9B-mmlongbench-doc-val-imgall-tok256
@@ -414,7 +448,8 @@ bash eval/distributed/stop_vllm_servers.sh
 - `MAX_TOKENS`: use `128` or `256` for short-answer benchmarking.
 - `MAX_MODEL_LEN`: vLLM max input/context length. Default is `16384`; raise only when needed.
 - `REQUEST_CONCURRENCY`: concurrent requests sent by each shard process to its local vLLM server. Default is `4`.
-- `MAX_NUM_SEQS`: vLLM server-side sequence batch capacity. Default is `4`; keep it at least as large as `REQUEST_CONCURRENCY` when memory allows.
+- `MAX_NUM_SEQS`: vLLM server-side sequence batch capacity. Default is `4`; keep
+  it at least as large as `REQUEST_CONCURRENCY` when memory allows.
 - `DEVICE_MEMORY_MONITOR`: set to `1` (default) to sample live HBM/VRAM usage, or `0` to disable it.
 - `DEVICE_MEMORY_INTERVAL`: seconds between device-memory samples. Default is `30`.
 - `PYTHON`: Python executable for helper scripts. Default is `${repo}/.venv/bin/python`.

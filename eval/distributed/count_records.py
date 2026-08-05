@@ -16,27 +16,34 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    dataset_root = Path(args.dataset_root)
-    if args.dataset == "longdocurl":
-        count = sum(
+def count_dataset_records(dataset: str, dataset_root: Path, split: str = "val") -> int:
+    if dataset == "longdocurl":
+        return sum(
             1
             for line in (dataset_root / "longdocurl" / "LongDocURL_public_with_subtask_category.jsonl").open()
             if line.strip()
         )
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency 'pyarrow'. Install eval/requirements-benchmark.txt first."
+        ) from exc
+    if dataset == "mmlongbench-doc":
+        files = sorted((dataset_root / "mmlongbench-doc" / "data").glob("train-*.parquet"))
+    elif dataset == "slidevqa":
+        files = sorted((dataset_root / "slidevqa" / "data").glob(f"{split}-*.parquet"))
     else:
-        try:
-            import pyarrow.parquet as pq
-        except ImportError as exc:
-            raise SystemExit(
-                "Missing dependency 'pyarrow'. Install eval/requirements-benchmark.txt first."
-            ) from exc
-        if args.dataset == "mmlongbench-doc":
-            files = sorted((dataset_root / "mmlongbench-doc" / "data").glob("train-*.parquet"))
-        else:
-            files = sorted((dataset_root / "slidevqa" / "data").glob(f"{args.split}-*.parquet"))
-        count = sum(pq.ParquetFile(path).metadata.num_rows for path in files)
+        raise ValueError(f"Unknown dataset: {dataset}")
+    return sum(pq.ParquetFile(path).metadata.num_rows for path in files)
+
+
+def main() -> None:
+    args = parse_args()
+    try:
+        count = count_dataset_records(args.dataset, Path(args.dataset_root), args.split)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
     print(count)
 
 

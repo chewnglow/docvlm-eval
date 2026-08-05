@@ -200,6 +200,7 @@ def run_record(args: argparse.Namespace, record: dict[str, Any]) -> dict[str, An
     row["response"] = response
     row["request_seconds"] = round(time.monotonic() - started, 3)
     row["request_attempts"] = attempts
+    row["completed_at"] = time.time()
     return row
 
 

@@ -21,11 +21,13 @@ import build_work_queue
 import device_plan
 import device_memory_monitor
 import merge_predictions
+import progress_monitor
 import queue_worker
 import queue_status
 import ray_orchestrator
 import run_benchmarks
 import score_benchmarks
+import suite_plan
 
 
 class FakeCompletions:
@@ -38,6 +40,111 @@ class FakeCompletions:
 
 
 class DistributedEvalTests(unittest.TestCase):
+    def test_suite_plan_declares_expected_experiments(self) -> None:
+        with mock.patch.object(suite_plan, "count_dataset_records", side_effect=[10, 20]):
+            plan = suite_plan.build_plan(
+                output_root=Path("/shared/output"),
+                dataset_root=Path("/shared/dataset"),
+                model_key="qwen3.5-9b",
+                served_model_name="Qwen3.5-9B",
+                benchmarks="mmlongbench-doc:val slidevqa:test",
+                max_images="all",
+                max_tokens="256",
+                device_count=8,
+            )
+        self.assertEqual([item["expected_count"] for item in plan["experiments"]], [10, 20])
+        self.assertEqual(
+            plan["experiments"][1]["run_name"],
+            "Qwen3.5-9B-slidevqa-test-imgall-tok256",
+        )
+
+    def test_progress_monitor_shows_active_waiting_eta_and_devices(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            plans = root / "_suite_plans"
+            plans.mkdir()
+            active_name = "Qwen3.5-9B-mmlongbench-doc-val-imgall-tok256"
+            waiting_name = "Qwen3.5-9B-slidevqa-val-imgall-tok256"
+            (plans / "qwen.json").write_text(
+                json.dumps(
+                    {
+                        "served_model_name": "Qwen3.5-9B",
+                        "device_count": 1,
+                        "experiments": [
+                            {
+                                "sequence": 0,
+                                "dataset": "mmlongbench-doc",
+                                "split": "val",
+                                "run_name": active_name,
+                                "expected_count": 10,
+                            },
+                            {
+                                "sequence": 1,
+                                "dataset": "slidevqa",
+                                "split": "val",
+                                "run_name": waiting_name,
+                                "expected_count": 20,
+                            },
+                        ],
+                    }
+                )
+            )
+            run_dir = root / active_name
+            queue = run_dir / "queue"
+            for state in ("pending", "claimed", "completed", "failed"):
+                (queue / state).mkdir(parents=True, exist_ok=True)
+            (queue / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "created_at": 1000,
+                        "dataset": "mmlongbench-doc",
+                        "split": "val",
+                        "record_count": 10,
+                        "task_count": 2,
+                    }
+                )
+            )
+            (queue / "READY").write_text("ready\n")
+            (queue / "records.jsonl").write_text(
+                "".join(json.dumps({"id": f"q{index}"}) + "\n" for index in range(1, 11))
+            )
+            (queue / "completed" / "task-000000.json").write_text("{}")
+            (queue / "claimed" / "task-000001.json").write_text("{}")
+            (run_dir / "shards").mkdir()
+            (run_dir / "shards" / "worker.jsonl").write_text(
+                '{"id":"q1","completed_at":1050}\n{"id":"q2","completed_at":1060}\n'
+            )
+            current = run_dir / "device_memory" / "current"
+            current.mkdir(parents=True)
+            (current / "node-a.json").write_text(
+                json.dumps(
+                    {
+                        "timestamp": 1095,
+                        "active": True,
+                        "node_id": "node-a",
+                        "backend": "ascend",
+                        "devices": [{"index": 0, "used_mb": 32768, "total_mb": 65536}],
+                    }
+                )
+            )
+
+            experiments = progress_monitor.discover_experiments(root, now=1100, eta_window_seconds=1800)
+            devices, errors = progress_monitor.discover_devices(experiments, now=1100, max_age=120)
+            overall = progress_monitor.overall_summary(experiments)
+            rendered = progress_monitor.render(experiments, devices, errors, now=1100)
+
+        self.assertEqual([item.state for item in experiments], ["RUNNING", "WAITING"])
+        self.assertEqual(experiments[0].successful, 2)
+        self.assertAlmostEqual(experiments[0].rate_per_hour, 72.0)
+        self.assertAlmostEqual(experiments[1].eta_seconds, 1000.0)
+        self.assertAlmostEqual(overall["eta_seconds"], 1400.0)
+        self.assertEqual(overall["expected_active_devices"], 1)
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(devices[0].utilization_percent, 50.0)
+        self.assertEqual(errors, [])
+        self.assertIn("TASK S/A/P", rendered)
+        self.assertIn("node-a", rendered)
+
     def test_parses_nvidia_and_ascend_device_memory(self) -> None:
         nvidia = device_memory_monitor.parse_nvidia_csv("0, 1024, 16384\n1, 2048, 16384\n")
         self.assertEqual(nvidia[1], {"index": 1, "used_mb": 2048.0, "total_mb": 16384.0})

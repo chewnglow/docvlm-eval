@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import time
 from typing import Any
 import uuid
 
@@ -149,6 +150,7 @@ def main() -> None:
 
     manifest = {
         **expected,
+        "created_at": time.time(),
         "record_count": len(records),
         "document_count": len(by_document),
         "task_count": len(tasks),

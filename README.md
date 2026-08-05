@@ -361,7 +361,38 @@ For each model/dataset run:
 The request is structured as `[shared instruction, document images, question]`
 so repeated questions can reuse vLLM prefix and multimodal preprocessing caches.
 
-### Monitor a live queue
+### Monitor the complete evaluation suite
+
+The suite dashboard is the primary progress interface. It discovers every model
+and benchmark under the shared output root, including planned experiments that
+have not started yet:
+
+```bash
+$PYTHON eval/distributed/progress_monitor.py \
+  --output-root /shared/docvlm_eval \
+  --watch 10
+```
+
+It displays:
+
+- overall record progress, aggregate throughput, state, and estimated completion time;
+- one row per model/benchmark experiment with settled records, task progress,
+  excluded failures, recent throughput, and ETA;
+- all fresh devices individually, including node, physical device index, HBM/VRAM
+  used and total, occupancy percentage, and sample age;
+- experiments that are waiting, preparing, running, finalizing, complete, partial,
+  invalid, or left unscored for more than ten minutes after queue completion.
+
+Waiting-experiment ETAs are estimates based on the measured throughput of that
+model's active or most recent experiment and are prefixed with `~`. Overall ETA
+accounts for benchmarks running sequentially within each model group and models
+running concurrently. It remains unavailable until every active model pipeline
+has a measured rate. Use `--json` instead of `--watch` for a machine-readable
+snapshot, or `--hide-devices` for a shorter experiment-only display.
+
+In the task column, `S/A/P` means settled, actively claimed, and pending tasks.
+
+The original one-experiment command remains useful for a compact queue check:
 
 ```bash
 RUN_DIR=/shared/docvlm_eval/Qwen3.5-9B-mmlongbench-doc-val-imgall-tok256
@@ -504,7 +535,8 @@ outputs/distributed/<run-name>/
 - `MAX_TOKENS`: output-token cap. Short-answer evaluation usually needs 128–256.
 - `MAX_MODEL_LEN`: maximum model context; increase only when the model supports it.
 - `REQUEST_CONCURRENCY`: requests submitted concurrently to each local endpoint.
-- `MAX_NUM_SEQS`: vLLM server-side sequence capacity; keep it at least as large as request concurrency when memory allows.
+- `MAX_NUM_SEQS`: vLLM server-side sequence capacity; keep it at least as large
+  as request concurrency when memory allows.
 - `DEVICE_MEMORY_MONITOR`: set to `1` (default) for live HBM/VRAM sampling, or `0` to disable it.
 - `DEVICE_MEMORY_INTERVAL`: seconds between memory samples; default `30`.
 - `MAX_NUM_BATCHED_TOKENS`: optional vLLM scheduler token budget.

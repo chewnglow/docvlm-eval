@@ -155,17 +155,26 @@ def main() -> None:
             break
 
         task = json.loads(claimed.read_text())
+        task_started = time.time()
+        task.setdefault("first_started_at", task_started)
+        task["last_started_at"] = task_started
+        write_task(claimed, task)
         task_records = [records_by_id[record_id] for record_id in task["record_ids"] if record_id not in done]
         try:
             with Heartbeat(claimed, heartbeat_interval):
                 if task_records:
                     done = run_records(warmup_args, task_records[:1], output, done)
                     done = run_records(runner_args, task_records[1:], output, done)
+            task["completed_at"] = time.time()
+            write_task(claimed, task)
             os.rename(claimed, queue_dir / "completed" / claimed.name)
         except Exception as exc:
             done = load_done_ids(output)
             task["attempts"] = int(task.get("attempts", 0)) + 1
             task["last_error"] = f"{type(exc).__name__}: {exc}"
+            task["last_attempt_at"] = time.time()
+            if task["attempts"] >= args.max_task_attempts:
+                task["failed_at"] = task["last_attempt_at"]
             write_task(claimed, task)
             destination = "failed" if task["attempts"] >= args.max_task_attempts else "pending"
             os.rename(claimed, queue_dir / destination / claimed.name)
