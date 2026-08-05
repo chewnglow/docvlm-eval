@@ -374,6 +374,23 @@ $PYTHON eval/distributed/queue_status.py \
 The status reports pending, active, completed, failed, and stale tasks plus the
 number of result rows written so far.
 
+While workers are active, the next status line shows aggregate Ascend HBM or
+NVIDIA VRAM occupation, the least/most occupied device, and the number of fresh
+devices and nodes represented:
+
+```text
+device_memory=742400/1048576MB (70.8%) per_device=67.3-74.9% devices=16 nodes=2 backend=ascend
+```
+
+Each node samples memory every 30 seconds by default. Current snapshots and the
+full history are stored under `RUN_DIR/device_memory/current/` and
+`RUN_DIR/device_memory/history/`; node-local monitor messages are also written to
+`RUN_DIR/logs/<node>/device-memory.log`. Set `DEVICE_MEMORY_INTERVAL=10` for a
+10-second interval, or `DEVICE_MEMORY_MONITOR=0` to disable monitoring. These
+variables are forwarded automatically by the Ray orchestrator. If `npu-smi` or
+`nvidia-smi` is unavailable inside the worker container, evaluation continues
+and the status reports the monitor as unavailable.
+
 Terminal failures do not stop later benchmarks. After the queue drains, successful
 records are scored normally and failed records are excluded. The run directory contains
 `failed_records.jsonl` with the original record data and final error for manual
@@ -474,9 +491,11 @@ outputs/distributed/<run-name>/
   queue/                 # queue mode only
   shards/                # resumable per-worker predictions
   logs/
+  device_memory/         # per-node current snapshots and JSONL history
   predictions.jsonl      # merged predictions
   scored.jsonl
   metrics.json
+  failed_records.jsonl   # terminal failures excluded from partial scoring
 ```
 
 ## Important Tuning Knobs
@@ -486,6 +505,8 @@ outputs/distributed/<run-name>/
 - `MAX_MODEL_LEN`: maximum model context; increase only when the model supports it.
 - `REQUEST_CONCURRENCY`: requests submitted concurrently to each local endpoint.
 - `MAX_NUM_SEQS`: vLLM server-side sequence capacity; keep it at least as large as request concurrency when memory allows.
+- `DEVICE_MEMORY_MONITOR`: set to `1` (default) for live HBM/VRAM sampling, or `0` to disable it.
+- `DEVICE_MEMORY_INTERVAL`: seconds between memory samples; default `30`.
 - `MAX_NUM_BATCHED_TOKENS`: optional vLLM scheduler token budget.
 - `MAX_RECORDS_PER_TASK`: document affinity versus load-balancing granularity; default `4`.
 - `IMAGE_DATA_CACHE_MB`: per-worker encoded-image cache; default `256` MB.

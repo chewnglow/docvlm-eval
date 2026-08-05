@@ -28,6 +28,10 @@ MAX_RETRIES="${MAX_RETRIES:-3}"
 IMAGE_DATA_CACHE_MB="${IMAGE_DATA_CACHE_MB:-256}"
 LEASE_SECONDS="${LEASE_SECONDS:-3600}"
 MAX_TASK_ATTEMPTS="${MAX_TASK_ATTEMPTS:-3}"
+DEVICE_TYPE="${DEVICE_TYPE:-ascend}"
+DEVICE_OFFSET="${DEVICE_OFFSET:-0}"
+DEVICE_MEMORY_MONITOR="${DEVICE_MEMORY_MONITOR:-1}"
+DEVICE_MEMORY_INTERVAL="${DEVICE_MEMORY_INTERVAL:-30}"
 API_KEY="${OPENAI_API_KEY:-dummy}"
 PYTHON="${PYTHON:-${ROOT_DIR}/.venv/bin/python}"
 
@@ -38,6 +42,33 @@ QUEUE_DIR="${QUEUE_DIR:-${RUN_DIR}/queue}"
 SHARD_DIR="${RUN_DIR}/shards"
 LOG_DIR="${RUN_DIR}/logs/${NODE_ID}"
 mkdir -p "${SHARD_DIR}" "${LOG_DIR}"
+
+MEMORY_MONITOR_PID=""
+stop_memory_monitor() {
+  if [[ -n "${MEMORY_MONITOR_PID}" ]] && kill -0 "${MEMORY_MONITOR_PID}" 2>/dev/null; then
+    kill "${MEMORY_MONITOR_PID}" 2>/dev/null || true
+    wait "${MEMORY_MONITOR_PID}" 2>/dev/null || true
+  fi
+  MEMORY_MONITOR_PID=""
+}
+trap stop_memory_monitor EXIT
+
+if [[ "${DEVICE_MEMORY_MONITOR}" == "1" ]]; then
+  DEVICE_INDICES=""
+  for LOCAL_RANK in $(seq 0 $((DEVICES_PER_NODE - 1))); do
+    DEVICE_INDEX=$((DEVICE_OFFSET + LOCAL_RANK))
+    DEVICE_INDICES="${DEVICE_INDICES}${DEVICE_INDICES:+,}${DEVICE_INDEX}"
+  done
+  "${PYTHON}" "${SCRIPT_DIR}/device_memory_monitor.py" \
+    --output-dir "${RUN_DIR}/device_memory" \
+    --node-id "${NODE_ID}" \
+    --device-indices "${DEVICE_INDICES}" \
+    --backend "${DEVICE_TYPE}" \
+    --interval "${DEVICE_MEMORY_INTERVAL}" \
+    >"${LOG_DIR}/device-memory.log" 2>&1 &
+  MEMORY_MONITOR_PID="$!"
+  echo "Device-memory monitor: ${DEVICE_TYPE} devices ${DEVICE_INDICES}, every ${DEVICE_MEMORY_INTERVAL}s"
+fi
 
 MAX_IMAGE_ARGS=()
 if [[ "${MAX_IMAGES}" != "all" && -n "${MAX_IMAGES}" ]]; then
@@ -81,4 +112,6 @@ if [[ "${STATUS}" -ne 0 ]]; then
   echo "At least one queue worker failed. Check ${LOG_DIR}" >&2
   exit "${STATUS}"
 fi
+stop_memory_monitor
+trap - EXIT
 echo "All local queue workers finished for ${RUN_NAME}."

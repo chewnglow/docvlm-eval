@@ -180,6 +180,22 @@ $PYTHON eval/distributed/queue_status.py \
   --shard-dir "$RUN_DIR/shards"
 ```
 
+The second output line reports live device-memory occupation aggregated from all
+nodes currently working on that run:
+
+```text
+device_memory=742400/1048576MB (70.8%) per_device=67.3-74.9% devices=16 nodes=2 backend=ascend
+```
+
+The launcher samples Ascend HBM with `npu-smi` or NVIDIA VRAM with `nvidia-smi`
+every 30 seconds. Set `DEVICE_MEMORY_INTERVAL=10` to change the interval or
+`DEVICE_MEMORY_MONITOR=0` to disable it. Ray forwards both settings. Per-node
+current snapshots and JSONL history are stored under
+`RUN_DIR/device_memory/{current,history}/`, and readable monitor logs are under
+`RUN_DIR/logs/<node>/device-memory.log`. Monitoring failures never stop an
+evaluation; `queue_status.py` reports unavailable data when vendor tooling is not
+visible inside the container.
+
 If one model group finishes first, stop its servers, point those nodes at the
 unfinished model's current `RUN_NAME`/`QUEUE_DIR`, launch that model, and run
 `run_queue_workers.sh`. New workers can join a live queue; no resharing step is
@@ -399,6 +415,8 @@ bash eval/distributed/stop_vllm_servers.sh
 - `MAX_MODEL_LEN`: vLLM max input/context length. Default is `16384`; raise only when needed.
 - `REQUEST_CONCURRENCY`: concurrent requests sent by each shard process to its local vLLM server. Default is `4`.
 - `MAX_NUM_SEQS`: vLLM server-side sequence batch capacity. Default is `4`; keep it at least as large as `REQUEST_CONCURRENCY` when memory allows.
+- `DEVICE_MEMORY_MONITOR`: set to `1` (default) to sample live HBM/VRAM usage, or `0` to disable it.
+- `DEVICE_MEMORY_INTERVAL`: seconds between device-memory samples. Default is `30`.
 - `PYTHON`: Python executable for helper scripts. Default is `${repo}/.venv/bin/python`.
 - `LIMIT_MM_PER_PROMPT`: should be >= `MAX_IMAGES`.
 - `TOTAL_SHARDS`: normally total GPUs across all nodes.

@@ -19,8 +19,10 @@ sys.path[:0] = [str(EVAL_DIR), str(DIST_DIR)]
 import benchmark_common
 import build_work_queue
 import device_plan
+import device_memory_monitor
 import merge_predictions
 import queue_worker
+import queue_status
 import ray_orchestrator
 import run_benchmarks
 import score_benchmarks
@@ -36,6 +38,45 @@ class FakeCompletions:
 
 
 class DistributedEvalTests(unittest.TestCase):
+    def test_parses_nvidia_and_ascend_device_memory(self) -> None:
+        nvidia = device_memory_monitor.parse_nvidia_csv("0, 1024, 16384\n1, 2048, 16384\n")
+        self.assertEqual(nvidia[1], {"index": 1, "used_mb": 2048.0, "total_mb": 16384.0})
+
+        ascend = device_memory_monitor.parse_ascend_info(
+            """
+| NPU   Chip | Bus-Id        | AICore(%)   HBM-Usage(MB) |
+| 0     0    | 0000:01:00.0  | 72          32768 / 65536 |
+| 1     0    | 0000:02:00.0  | 65          16384 / 65536 |
+"""
+        )
+        self.assertEqual(
+            ascend,
+            [
+                {"index": 0, "used_mb": 32768.0, "total_mb": 65536.0},
+                {"index": 1, "used_mb": 16384.0, "total_mb": 65536.0},
+            ],
+        )
+
+    def test_queue_status_aggregates_fresh_device_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            current = Path(temp) / "current"
+            current.mkdir()
+            for node, used in (("node-a", 1000), ("node-b", 3000)):
+                (current / f"{node}.json").write_text(
+                    json.dumps(
+                        {
+                            "timestamp": 1000,
+                            "active": True,
+                            "backend": "ascend",
+                            "devices": [{"index": 0, "used_mb": used, "total_mb": 8000}],
+                        }
+                    )
+                )
+            status = queue_status.memory_status(Path(temp), max_age=120, now=1050)
+            self.assertIn("device_memory=4000/16000MB (25.0%)", status)
+            self.assertIn("per_device=12.5-37.5%", status)
+            self.assertIn("devices=2 nodes=2", status)
+
     def test_ray_discovers_only_live_npu_nodes(self) -> None:
         nodes = ray_orchestrator.discover_compute_nodes(
             [
@@ -246,6 +287,7 @@ class DistributedEvalTests(unittest.TestCase):
             {
                 "BENCHMARKS": "slidevqa:val",
                 "OPENAI_API_KEY": "dummy",
+                "DEVICE_MEMORY_INTERVAL": "10",
                 "UNRELATED_SECRET": "do-not-copy",
             }
         )
@@ -267,6 +309,7 @@ class DistributedEvalTests(unittest.TestCase):
         self.assertEqual(env["BASE_PORT"], "8002")
         self.assertEqual(env["MODEL_PATH"], "/models/qwen")
         self.assertEqual(env["BENCHMARKS"], "slidevqa:val")
+        self.assertEqual(env["DEVICE_MEMORY_INTERVAL"], "10")
         self.assertTrue(env["LOG_DIR"].startswith("/shared/results/_ray_nodes/"))
         self.assertTrue(env["PID_DIR"].startswith("/shared/results/_ray_nodes/"))
         self.assertNotIn("UNRELATED_SECRET", env)
