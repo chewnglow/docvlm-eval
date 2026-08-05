@@ -178,8 +178,14 @@ def main() -> None:
 
     failed = list((queue_dir / "failed").glob("task-*.json"))
     if failed:
-        raise SystemExit(f"Queue finished with {len(failed)} failed task(s) in {queue_dir / 'failed'}")
-    print(f"Worker {worker_id}: queue complete", flush=True)
+        print(
+            f"Worker {worker_id}: queue complete with {len(failed)} terminally failed task(s); "
+            "their unresolved records will be excluded from scoring and written to failed_records.jsonl",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print(f"Worker {worker_id}: queue complete", flush=True)
 
 
 if __name__ == "__main__":

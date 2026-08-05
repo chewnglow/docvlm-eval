@@ -281,7 +281,16 @@ outputs/distributed/<model>-<dataset>-<split>-img8-tok256/
   predictions.jsonl
   scored.jsonl
   metrics.json
+  failed_records.jsonl
 ```
+
+Requests and tasks are retried according to `MAX_RETRIES` and `MAX_TASK_ATTEMPTS`.
+After those retries are exhausted, terminally failed records remain under
+`queue/failed`, are copied to `failed_records.jsonl` with their final error, and are
+excluded from scoring. They do not stop the suite from advancing to the next benchmark.
+Check the `coverage` object in `metrics.json`: `status: partial` means the reported
+metric covers only the successfully evaluated records. Scoring still fails for an empty
+queue or for missing records that have no corresponding terminal failure entry.
 
 ## Multi-Node, 8 GPUs Total
 

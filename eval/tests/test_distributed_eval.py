@@ -23,6 +23,7 @@ import merge_predictions
 import queue_worker
 import ray_orchestrator
 import run_benchmarks
+import score_benchmarks
 
 
 class FakeCompletions:
@@ -561,6 +562,60 @@ class DistributedEvalTests(unittest.TestCase):
                 merge_predictions.main()
             rows = [json.loads(line) for line in output.read_text().splitlines()]
             self.assertEqual([row["id"] for row in rows], ["q1", "q2"])
+
+    def test_distributed_coverage_excludes_only_terminal_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            queue = Path(temp)
+            (queue / "failed").mkdir()
+            (queue / "manifest.json").write_text(json.dumps({"record_count": 3}))
+            (queue / "records.jsonl").write_text(
+                '\n'.join(
+                    json.dumps({"id": record_id, "question": f"question-{record_id}"})
+                    for record_id in ("q1", "q2", "q3")
+                )
+                + "\n"
+            )
+            (queue / "failed" / "task-000001.json").write_text(
+                json.dumps(
+                    {
+                        "task_id": "task-000001",
+                        "record_ids": ["q2", "q3"],
+                        "attempts": 3,
+                        "last_error": "context length exceeded",
+                    }
+                )
+            )
+
+            coverage, failed = score_benchmarks.distributed_coverage(
+                queue,
+                [{"id": "q1"}, {"id": "q2"}],
+            )
+
+            self.assertEqual(coverage["status"], "partial")
+            self.assertEqual(coverage["expected_count"], 3)
+            self.assertEqual(coverage["scored_count"], 2)
+            self.assertEqual(coverage["excluded_failed_count"], 1)
+            self.assertAlmostEqual(coverage["score_coverage"], 2 / 3)
+            self.assertEqual([record["id"] for record in failed], ["q3"])
+            self.assertEqual(failed[0]["queue_failure"]["attempts"], 3)
+
+    def test_distributed_coverage_rejects_empty_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            queue = Path(temp)
+            (queue / "failed").mkdir()
+            (queue / "manifest.json").write_text(json.dumps({"record_count": 0}))
+            (queue / "records.jsonl").write_text("")
+            with self.assertRaises(SystemExit):
+                score_benchmarks.distributed_coverage(queue, [])
+
+    def test_distributed_coverage_rejects_unaccounted_missing_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            queue = Path(temp)
+            (queue / "failed").mkdir()
+            (queue / "manifest.json").write_text(json.dumps({"record_count": 2}))
+            (queue / "records.jsonl").write_text('{"id":"q1"}\n{"id":"q2"}\n')
+            with self.assertRaises(SystemExit):
+                score_benchmarks.distributed_coverage(queue, [{"id": "q1"}])
 
 
 if __name__ == "__main__":

@@ -355,7 +355,8 @@ For each model/dataset run:
 4. warm the shared document prefix before concurrent sibling questions;
 5. checkpoint every successful response immediately;
 6. retry failed requests and recover tasks whose worker lease expired;
-7. merge worker JSONL files, remove duplicate IDs, and score the run.
+7. retain terminally failed tasks for manual follow-up while allowing the suite to continue;
+8. merge successful worker JSONL files, remove duplicate IDs, and score only those records.
 
 The request is structured as `[shared instruction, document images, question]`
 so repeated questions can reuse vLLM prefix and multimodal preprocessing caches.
@@ -372,6 +373,16 @@ $PYTHON eval/distributed/queue_status.py \
 
 The status reports pending, active, completed, failed, and stale tasks plus the
 number of result rows written so far.
+
+Terminal failures do not stop later benchmarks. After the queue drains, successful
+records are scored normally and failed records are excluded. The run directory contains
+`failed_records.jsonl` with the original record data and final error for manual
+evaluation. `metrics.json` includes a `coverage` object with the expected, scored, and
+excluded record counts plus `score_coverage`; treat a result whose coverage status is
+`partial` as a partial benchmark score. A record missing from both predictions and the
+failed queue still stops scoring, because that indicates lost work rather than an
+intentional exclusion. Empty queues are also rejected instead of producing zero-valued
+score files.
 
 ### Rebalance after one model finishes
 

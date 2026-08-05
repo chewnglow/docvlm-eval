@@ -17,6 +17,16 @@ fi
 PRED="${RUN_DIR}/predictions.jsonl"
 SCORED="${RUN_DIR}/scored.jsonl"
 SUMMARY="${RUN_DIR}/metrics.json"
+FAILED="${RUN_DIR}/failed_records.jsonl"
+QUEUE_DIR="${QUEUE_DIR:-${RUN_DIR}/queue}"
+
+QUEUE_SCORE_ARGS=()
+if [[ -f "${QUEUE_DIR}/manifest.json" ]]; then
+  QUEUE_SCORE_ARGS=(
+    --queue-dir "${QUEUE_DIR}"
+    --failed-output "${FAILED}"
+  )
+fi
 
 "${PYTHON}" "${SCRIPT_DIR}/merge_predictions.py" \
   --shard-dir "${RUN_DIR}/shards" \
@@ -27,9 +37,13 @@ SUMMARY="${RUN_DIR}/metrics.json"
   --predictions "${PRED}" \
   --output "${SCORED}" \
   --summary "${SUMMARY}" \
+  "${QUEUE_SCORE_ARGS[@]}" \
   ${SCORE_EXTRA_ARGS:-}
 
 echo "Wrote:"
 echo "  ${PRED}"
 echo "  ${SCORED}"
 echo "  ${SUMMARY}"
+if [[ -f "${FAILED}" ]]; then
+  echo "  ${FAILED}"
+fi

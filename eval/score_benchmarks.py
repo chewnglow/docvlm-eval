@@ -46,7 +46,87 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extract-model", default=None, help="Optional OpenAI-compatible answer extractor model.")
     parser.add_argument("--base-url", default=os.environ.get("OPENAI_BASE_URL"))
     parser.add_argument("--api-key", default=os.environ.get("OPENAI_API_KEY"))
+    parser.add_argument(
+        "--queue-dir",
+        default=None,
+        help="Optional distributed queue used to validate coverage and identify terminal failures.",
+    )
+    parser.add_argument(
+        "--failed-output",
+        default=None,
+        help="Write unresolved records from terminally failed queue tasks to this JSONL file.",
+    )
     return parser.parse_args()
+
+
+def distributed_coverage(
+    queue_dir: Path,
+    prediction_rows: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Validate a drained queue and describe records excluded after terminal failure."""
+    manifest = json.loads((queue_dir / "manifest.json").read_text())
+    expected_count = int(manifest.get("record_count", 0))
+    if expected_count == 0:
+        raise SystemExit(
+            f"Refusing to score an empty queue at {queue_dir}. Check the dataset metadata files and rebuild the queue."
+        )
+
+    records = read_jsonl(queue_dir / "records.jsonl")
+    records_by_id = {str(record["id"]): record for record in records}
+    if len(records_by_id) != expected_count:
+        raise SystemExit(
+            f"Queue manifest expects {expected_count} records, but {queue_dir / 'records.jsonl'} "
+            f"contains {len(records_by_id)} unique records."
+        )
+
+    predicted_ids = {str(row["id"]) for row in prediction_rows}
+    expected_ids = set(records_by_id)
+    extra_ids = predicted_ids - expected_ids
+    if extra_ids:
+        preview = ", ".join(sorted(extra_ids)[:5])
+        raise SystemExit(f"Predictions contain {len(extra_ids)} IDs outside this queue: {preview}")
+
+    failure_by_record: dict[str, dict[str, Any]] = {}
+    failed_tasks = sorted((queue_dir / "failed").glob("task-*.json"))
+    for path in failed_tasks:
+        task = json.loads(path.read_text())
+        failure = {
+            "task_id": str(task.get("task_id", path.stem)),
+            "attempts": int(task.get("attempts", 0)),
+            "last_error": str(task.get("last_error", "")),
+        }
+        for record_id in task.get("record_ids", []):
+            failure_by_record[str(record_id)] = failure
+
+    missing_ids = expected_ids - predicted_ids
+    excluded_ids = missing_ids & set(failure_by_record)
+    unexpected_missing = missing_ids - excluded_ids
+    if unexpected_missing:
+        preview = ", ".join(sorted(unexpected_missing)[:5])
+        raise SystemExit(
+            f"Refusing to score: {len(unexpected_missing)} records have neither predictions nor terminal "
+            f"failed-task entries: {preview}"
+        )
+
+    failed_records: list[dict[str, Any]] = []
+    for record_id in sorted(excluded_ids):
+        record = dict(records_by_id[record_id])
+        record["queue_failure"] = failure_by_record[record_id]
+        failed_records.append(record)
+
+    scored_count = len(predicted_ids)
+    excluded_count = len(excluded_ids)
+    return (
+        {
+            "status": "partial" if excluded_count else "complete",
+            "expected_count": expected_count,
+            "scored_count": scored_count,
+            "excluded_failed_count": excluded_count,
+            "failed_task_count": len(failed_tasks),
+            "score_coverage": scored_count / expected_count,
+        },
+        failed_records,
+    )
 
 
 def extract_with_openai(args: argparse.Namespace, row: dict[str, Any]) -> str:
@@ -165,10 +245,18 @@ def summarize(args: argparse.Namespace, rows: list[dict[str, Any]]) -> dict[str,
 
 def main() -> None:
     args = parse_args()
+    if bool(args.queue_dir) != bool(args.failed_output):
+        raise SystemExit("--queue-dir and --failed-output must be provided together.")
     rows = read_jsonl(Path(args.predictions))
+    coverage = None
+    if args.queue_dir:
+        coverage, failed_records = distributed_coverage(Path(args.queue_dir), rows)
+        write_jsonl(Path(args.failed_output), failed_records)
     scored = score_rows(args, rows)
     write_jsonl(Path(args.output), scored)
     summary = summarize(args, scored)
+    if coverage is not None:
+        summary["coverage"] = coverage
     Path(args.summary).parent.mkdir(parents=True, exist_ok=True)
     Path(args.summary).write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
     print(json.dumps(summary, indent=2, ensure_ascii=False))
