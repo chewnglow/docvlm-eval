@@ -65,17 +65,39 @@ def parse_nvidia_csv(output: str) -> list[dict[str, Any]]:
 def parse_ascend_info(output: str) -> list[dict[str, Any]]:
     """Parse the device rows containing HBM-Usage(MB) from ``npu-smi info``."""
     devices: dict[int, dict[str, Any]] = {}
+    current_npu: int | None = None
+    health_values = {"OK", "WARNING", "ALARM", "CRITICAL", "UNKNOWN"}
     for line in output.splitlines():
-        pairs = re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)", line)
-        if not pairs:
-            continue
         columns = [column.strip() for column in line.split("|") if column.strip()]
         if not columns:
             continue
-        identity = re.match(r"^(\d+)\s+(\d+)(?:\s|$)", columns[0])
-        if identity is None:
+
+        # Huawei's standard table uses two rows per NPU. The first row begins
+        # with "NPU-ID  Name" and the second begins with only the chip ID.
+        # Remember the NPU ID from the health row for the following HBM row.
+        first_number = re.match(r"^(\d+)(?:\s|$)", columns[0])
+        if (
+            first_number is not None
+            and len(columns) >= 2
+            and columns[1].strip().upper() in health_values
+        ):
+            current_npu = int(first_number.group(1))
             continue
-        index = int(identity.group(1))
+
+        pairs = re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*/\s*([0-9]+(?:\.[0-9]+)?)", line)
+        if not pairs or len(columns) < 2:
+            continue
+        is_chip_row = ":" in columns[1] and "." in columns[1]
+        if not is_chip_row:
+            continue
+
+        compact_identity = re.match(r"^(\d+)\s+(\d+)(?:\s|$)", columns[0])
+        if compact_identity is not None:
+            index = int(compact_identity.group(1))
+        elif current_npu is not None and re.match(r"^\d+(?:\s|$)", columns[0]):
+            index = current_npu
+        else:
+            continue
         used_mb, total_mb = (float(value) for value in pairs[-1])
         if total_mb <= 0:
             continue

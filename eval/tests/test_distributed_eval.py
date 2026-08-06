@@ -164,6 +164,24 @@ class DistributedEvalTests(unittest.TestCase):
             ],
         )
 
+        official_two_row_layout = device_memory_monitor.parse_ascend_info(
+            """
+| NPU   Name | Health | Power(W) Temp(C) Hugepages-Usage(page) |
+| Chip       | Bus-Id | AICore(%) Memory-Usage(MB) HBM-Usage(MB) |
+| 0     910B4 | OK | 93.2 47 0 / 0 |
+| 0 | 0000:C1:00.0 | 0 0 / 0 60185 / 65536 |
+| 1     910B4 | Warning | 91.0 47 0 / 0 |
+| 0 | 0000:01:00.0 | 0 0 / 0 60171 / 65536 |
+"""
+        )
+        self.assertEqual(
+            official_two_row_layout,
+            [
+                {"index": 0, "used_mb": 60185.0, "total_mb": 65536.0},
+                {"index": 1, "used_mb": 60171.0, "total_mb": 65536.0},
+            ],
+        )
+
     def test_queue_status_aggregates_fresh_device_memory(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             current = Path(temp) / "current"
